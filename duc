@@ -1,0 +1,428 @@
+#!/bin/bash
+now_date=$(date "+%Y%m%d")
+KB=1024
+MB=$((KB * 1024))
+GB=$((MB * 1024))
+TB=$((GB * 1024))
+PB=$((TB * 1024))
+EB=$((PB * 1024))
+RUN=0
+DEBUG=0
+COMPARE=0
+usage() {
+    cat <<EOF
+usage: $0 options
+
+This script is used to analyze on the output file of du command,
+or compare every output file of du command to the baseline's
+
+OPTIONS:
+    -p    specify the target path
+    -a    same meaning as find's -maxdepth parameter based on the target path
+    -i    same meaning as find's -mindepth parameter based on the target path
+    -n    specify the top n of the largest size in the target path
+    -s    specify the size of files and directories which are larger(+) or smaller(-)
+    -b    specify the begin date point of the database, and it's be chosen as the baseline, if not specified, will choose the oldest one
+    -e    specify the end date point of the database, if not specified, will choose the latest one
+    -v    enable debug output
+    -r    real run mode
+    -c    comparing to the baseline's data
+    -d    specify the base path of the database
+EOF
+}
+
+format_size() {
+    if [[ $# -ne 1 ]]; then
+        echo "Error: $0 takes one parameter !!!"
+        exit 1
+    fi
+
+    ret=
+    size=$(($1))
+    if [[ $size -ge $EB ]]; then
+        ret=$(awk 'BEGIN{printf "%.2f EB", '$size' / '$EB'}')
+    elif [[ $size -ge $PB ]]; then
+        ret=$(awk 'BEGIN{printf "%.2f PB", '$size' / '$PB'}')
+    elif [[ $size -ge $TB ]]; then
+        ret=$(awk 'BEGIN{printf "%.2f TB", '$size' / '$TB'}')
+    elif [[ $size -ge $GB ]]; then
+        ret=$(awk 'BEGIN{printf "%.2f GB", '$size' / '$GB'}')
+    elif [[ $size -ge $MB ]]; then
+        ret=$(awk 'BEGIN{printf "%.2f MB", '$size' / '$MB'}')
+    elif [[ $size -ge $KB ]]; then
+        ret=$(awk 'BEGIN{printf "%.2f KB", '$size' / '$KB'}')
+    else
+        ret=$(awk 'BEGIN{printf "%.2f Bytes", '$size'}')
+    fi
+    echo "$ret"
+}
+
+function bubble_sort() {
+    IFS=" " read -r -a list <<<"$@"
+    length=$(($# - 1))
+    for ((i = 1; i < $length; i++)); do
+        for ((j = 0; j < $length - i; j++)); do
+            left=$((${list[$j]}))
+            k=$(($j + 1))
+            right=$((${list[$k]}))
+            if [[ $left -gt $right ]]; then
+                temp="$left"
+                list[$j]=$right
+                list[$k]=$temp
+            fi
+        done
+    done
+
+    echo ${list[*]}
+}
+
+while getopts "a:i:b:e:p:n:s:d:rchv" OPTION; do
+    case $OPTION in
+    h)
+        usage "$@"
+        exit 1
+        ;;
+    c)
+        COMPARE=1
+        ;;
+    v)
+        DEBUG=1
+        ;;
+    r)
+        RUN=1
+        ;;
+    a)
+        MAXDEPTH=$(($OPTARG))
+        ;;
+    i)
+        MINDEPTH=$(($OPTARG))
+        ;;
+    b)
+        BEGIN=$(($OPTARG))
+        ;;
+    e)
+        END=$(($OPTARG))
+        ;;
+    p)
+        TARGET_PATH=$OPTARG
+        ;;
+    n)
+        TOP_N=$(($OPTARG))
+        ;;
+    s)
+        THRESHOLD_SIZE=$OPTARG
+        ;;
+    d)
+        DATABASE_BASEDIR=$OPTARG
+        ;;
+    ?)
+        usage "$@"
+        exit 1
+        ;;
+    esac
+done
+
+if [[ $DEBUG -eq 1 ]]; then
+    echo "Info: enable debug mode"
+    set -ex
+else
+    set -e
+fi
+
+if [[ -z $RUN ]] || [[ $RUN -eq 0 ]]; then
+    usage
+    exit 0
+else
+    echo "Info: Real run mode"
+fi
+
+if [[ $COMPARE -eq 1 ]]; then
+    echo "Info: Show in compare mode"
+fi
+
+if [[ -n "$DATABASE_BASEDIR" ]]; then
+    if [[ ! -d "$DATABASE_BASEDIR" ]]; then
+        echo "Error: $DATABASE_BASEDIR INVALID !!!"
+        exit 1
+    fi
+else
+    echo "Error DATABASE_BASEDIR not specified !!!"
+    exit 1
+fi
+echo "Info: database's base dir is $DATABASE_BASEDIR"
+
+if [[ -z "$TARGET_PATH" ]]; then
+    echo "Error: TARGET_PATH NOT specified !!!"
+    exit 1
+fi
+FINAL=${TARGET_PATH: -1}
+if [[ $FINAL == '/' ]]; then
+    TARGET_PATH=${TARGET_PATH%?}
+fi
+echo "Info: target base directory is $TARGET_PATH"
+
+if [[ -n $MAXDEPTH ]]; then
+    ret=$(echo $MAXDEPTH | grep -oE "^[0-9]+$")
+    if [[ -z "$ret" ]]; then
+        echo "Error: -a $MAXDEPTH NOT INTEGER !!!"
+        exit 1
+    else
+        echo "Info: max-depth is $MAXDEPTH"
+    fi
+else
+    echo "Info: NOT set max-depth"
+fi
+
+if [[ -n $MINDEPTH ]]; then
+    ret=$(echo $MINDEPTH | grep -oE "^[0-9]+$")
+    if [[ -z "$ret" ]]; then
+        echo "Error: -i $MINDEPTH NOT INTEGER !!!"
+        exit 1
+    else
+        echo "Info: mind-depth is $MINDEPTH"
+    fi
+else
+    echo "Info: NOT set min-depth"
+fi
+
+if [[ -n $MAXDEPTH ]] && [[ -n $MINDEPTH ]]; then
+    if [[ $MAXDEPTH -lt $MINDEPTH ]]; then
+        echo "Error:  -a $MAXDEPTH <= -i $MINDEPTH !!!"
+        exit 1
+    fi
+fi
+
+if [[ -n $TOP_N ]]; then
+    ret=$(echo $TOP_N | grep -oE "^[0-9]+$")
+    if [[ -z "$ret" ]]; then
+        echo "Error: -n $TOP_N NOT INTEGER !!!"
+        exit 1
+    elif [[ $(($TOP_N)) -eq 0 ]]; then
+        TOP_N=
+    else
+        echo "Info: top-n is $TOP_N"
+    fi
+else
+    echo "Info: NOT set top-n"
+fi
+
+GREATER_THAN=1
+if [[ -n $THRESHOLD_SIZE ]]; then
+    ret=$(echo $THRESHOLD_SIZE | grep -oE "^[+-]*[0-9]+(k|K|m|M|g|G|t|T|p|P|e|E)?$")
+    if [[ -z "$ret" ]]; then
+        echo "-s $THRESHOLD_SIZE INVALID !!!"
+        exit 1
+    else
+        RAW_THRESHOLD_SIZE=$(echo $THRESHOLD_SIZE | tr -d '+' | tr -d '-')
+        FINAL=${RAW_THRESHOLD_SIZE: -1}
+        case $FINAL in
+        [kK]) RAW_THRESHOLD_SIZE=$(($((${RAW_THRESHOLD_SIZE%?})) * $KB)) ;;
+        [mM]) RAW_THRESHOLD_SIZE=$(($((${RAW_THRESHOLD_SIZE%?})) * $MB)) ;;
+        [gG]) RAW_THRESHOLD_SIZE=$(($((${RAW_THRESHOLD_SIZE%?})) * $GB)) ;;
+        [tT]) RAW_THRESHOLD_SIZE=$(($((${RAW_THRESHOLD_SIZE%?})) * $TB)) ;;
+        [pP]) RAW_THRESHOLD_SIZE=$(($((${RAW_THRESHOLD_SIZE%?})) * $PB)) ;;
+        [eE]) RAW_THRESHOLD_SIZE=$(($((${RAW_THRESHOLD_SIZE%?})) * $EB)) ;;
+        esac
+    fi
+    if [[ ${THRESHOLD_SIZE:0:1} == '-' ]]; then
+        GREATER_THAN=0
+    fi
+    THRESHOLD_SIZE=$RAW_THRESHOLD_SIZE
+    echo "Info: threshold size is $THRESHOLD_SIZE"
+else
+    echo "Info: threshold size is 0"
+fi
+
+if [[ -n $BEGIN ]]; then
+    ret=$(echo $BEGIN | grep -oE "^[0-9]{8}$")
+    if [[ -z "$ret" ]]; then
+        echo "Error: -b $BEGIN should like 20220405 !!!"
+        exit
+    fi
+else
+    BEGIN=0
+fi
+echo "Info: begin date is $BEGIN"
+
+if [[ -n $END ]]; then
+    ret=$(echo $END | grep -oE "^[0-9]{8}$")
+    if [[ -z "$ret" ]]; then
+        echo "Error: -b $END should like 20220405 !!!"
+        exit
+    fi
+else
+    END=$(($now_date))
+fi
+echo "Info: end date is $END"
+
+declare -a DATABASES=()
+baseline_db=
+if [[ -n $BEGIN ]] && [[ -n $END ]]; then
+    if [[ $END -lt $BEGIN ]]; then
+        echo "Error: -e $END <= -b $BEGIN !!!"
+        exit 1
+    else
+        for db in "$DATABASE_BASEDIR"/*; do
+            date_str=$(($(basename "$db" | cut -d '.' -f 3)))
+            if [[ $date_str -ge $BEGIN ]] && [[ $date_str -le $END ]]; then
+                DATABASES[${#DATABASES[*]}]=$(($date_str))
+            else
+                echo "Warning: $db is not in date range !!!"
+            fi
+        done
+    fi
+
+    # sort by bubble sort
+    IFS=" " read -r -a DATABASES <<<$(bubble_sort ${DATABASES[*]})
+
+    # format the full path
+    length=${#DATABASES[@]}
+    for ((i = 0; i < $length; i++)); do
+        DATABASES["$i"]="$DATABASE_BASEDIR"/du.txt.${DATABASES[$i]}
+    done
+else
+    for db in "$DATABASE_BASEDIR"/*; do
+        date_str=$(basename "$db" | cut -d '.' -f 3)
+        DATABASES[${#DATABASES[*]}]=$(($date_str))
+    done
+
+    # sort by bubble sort
+    IFS=" " read -r -a DATABASES <<<$(bubble_sort ${DATABASES[*]})
+    length=${#DATABASES[@]}
+    for ((i = 0; i < $length; i++)); do
+        DATABASES["$i"]="$DATABASE_BASEDIR"/du.txt.${DATABASES[$i]}
+    done
+fi
+if [[ ${#DATABASES[@]} -gt 0 ]] && [[ $COMPARE -eq 1 ]]; then
+    baseline_db=${DATABASES[0]}
+    echo "Info: baseline is $baseline_db"
+fi
+
+for db in "${DATABASES[@]}"; do
+    if [[ -s "$db" ]]; then
+        declare -a data=()
+        # filter out the base
+        if [[ -z $THRESHOLD_SIZE ]]; then
+            if [[ -z $MAXDEPTH ]] && [[ -z $MINDEPTH ]]; then
+                if [[ -z $TOP_N ]]; then
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}$" "$db" | sort -n -k 1 -r)
+                else
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}$" "$db" | sort -n -k 1 -r | head -n $TOP_N)
+                fi
+            elif [[ -n $MINDEPTH ]] && [[ -z $MAXDEPTH ]]; then
+                if [[ -z $TOP_N ]]; then
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,}$" "$db" | sort -n -k 1 -r)
+                else
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,}$" "$db" | sort -n -k 1 -r | head -n $TOP_N)
+                fi
+            elif [[ -n $MAXDEPTH ]] && [[ -z $MINDEPTH ]]; then
+                if [[ -z $TOP_N ]]; then
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){,$MAXDEPTH}$" "$db" | sort -n -k 1 -r | head -n $TOP_N)
+                else
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){,$MAXDEPTH}$" "$db" | sort -n -k 1 -r | head -n $TOP_N)
+                fi
+            else
+                if [[ -z $TOP_N ]]; then
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,$MAXDEPTH}$" "$db" | sort -n -k 1 -r)
+                else
+                    mapfile -t data < <(grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,$MAXDEPTH}$" "$db" | sort -n -k 1 -r | head -n $TOP_N)
+                fi
+            fi
+        else
+            if [[ -z $MAXDEPTH ]] && [[ -z $MINDEPTH ]]; then
+                if [[ -z $TOP_N ]]; then
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}$" | sort -n -k 1 -r)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}$" | sort -n -k 1 -r)
+                    fi
+                else
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    fi
+                fi
+            elif [[ -n $MINDEPTH ]] && [[ -z $MAXDEPTH ]]; then
+                if [[ -z $TOP_N ]]; then
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,}$" | sort -n -k 1 -r)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,}$" | sort -n -k 1 -r)
+                    fi
+                else
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    fi
+                fi
+            elif [[ -n $MAXDEPTH ]] && [[ -z $MINDEPTH ]]; then
+                if [[ -z $TOP_N ]]; then
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){,$MAXDEPTH}$" | sort -n -k 1 -r)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){,$MAXDEPTH}$" | sort -n -k 1 -r)
+                    fi
+                else
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){,$MAXDEPTH}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){,$MAXDEPTH}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    fi
+                fi
+            else
+                if [[ -z $TOP_N ]]; then
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,$MAXDEPTH}$" | sort -n -k 1 -r)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,$MAXDEPTH}$" | sort -n -k 1 -r)
+                    fi
+                else
+                    if [[ $GREATER_THAN -eq 1 ]]; then
+                        mapfile -t data < <(awk '{if($1>='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,$MAXDEPTH}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    else
+                        mapfile -t data < <(awk '{if($1<='$THRESHOLD_SIZE') printf "%ld\t%s\n", $1,$NF}' < "$db" | grep -E "^[[:digit:]]+[[:space:]]+${TARGET_PATH}(/[^/]+){$MINDEPTH,$MAXDEPTH}$" | sort -n -k 1 -r | head -n $TOP_N)
+                    fi
+                fi
+            fi
+        fi
+
+        date_str=$(basename "$db" | cut -d '.' -f 3)
+        length=${#data[@]}
+        printf "======== Date: %s/%s/%s ========\n" ${date_str:0:4} ${date_str:4:2} ${date_str:6:2}
+        if [[ $length -eq 0 ]] || [[ -z $length ]]; then
+            printf "No satisfied data !!!\n"
+        else
+            for d in "${data[@]}"; do
+                d=$(echo $d | tr -d '\n')
+                size=$(echo $d | awk '{print $1F}')
+                formatted_size=$(format_size $size)
+                path=$(echo $d | awk '{print $NF}')
+                if [[ $COMPARE -eq 0 ]] || [[ "$baseline_db" == "$db" ]]; then
+                    printf "%ld\t%s\t%s\n" "$size" "$formatted_size" "$path"
+                elif [[ $COMPARE -eq 1 ]]; then
+                    ret=$(grep -E "^[[:digit:]]+[[:space:]]+${d}$" $baseline_db)
+                    # cannot find the path in the baseline's record
+                    if [[ -z $ret ]]; then
+                        printf "%s\t%s\t%s\n" "+$size" "+$formatted_size" "$path"
+                    else
+                        # get the size in the baseline's record
+                        base_size=$(($(echo $ret | awk '{print $1F}')))
+                        diff=$((size - base_size))
+                        if [[ $diff -gt 0 ]]; then
+                            formatted_size=$(format_size $diff)
+                            printf "%ld\t%s\t%s\n" $diff "+$formatted_size" "$path"
+                        elif [[ $diff -eq 0 ]]; then
+                            formatted_size=$(format_size $diff)
+                            printf "%s\t%s\t%s\n" "=0" "=0" $path
+                        else
+                            formatted_size=$(format_size $((0 - diff)))
+                            printf "%ld\t%s\t%s\n" $diff "-$formatted_size" "$path"
+                        fi
+                    fi
+                fi
+            done
+        fi
+    fi
+done
